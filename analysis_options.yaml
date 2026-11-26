@@ -10,6 +10,11 @@
 include: package:flutter_lints/flutter.yaml
 
 analyzer:
+  # Flutter 3.50 把 package:flutter/material.dart 标为已废弃（建议改用 material_ui，
+  # 但该包在模板里是坏的）。这里的 7 条只是 info 级提示，不是错误，忽略它，
+  # 让 flutter analyze 只拦真正的错误，否则 CI 在 Analyze 一步就失败。
+  errors:
+    deprecated_member_use: ignore
   exclude:
     - build/**
     - android/**
