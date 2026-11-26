@@ -1,14 +1,22 @@
 // AR 试衣镜：前置摄像头 + ML Kit 姿态关键点，
-// 把选好的上衣/下装按肩、胯、膝关键点贴到人身上。
+// 把用户衣橱里那件真实衣服的抠图按姿态做透视贴合。
+//
+// 硬要求（全部本机实现，不联网、不调任何云端/付费服务）：
+// 1. 衣服必须是真实的：只用用户导入/拍照的真实衣服抠图，
+//    没有内置样衣、不生成假衣服；衣橱空着就什么都不画。
+// 2. 对位要准：每帧按肩/髋/膝关键点重新算目标四边形，
+//    单应性透视变换贴合（旋转+缩放+透视一次完成），衣服跟着身体走；
+//    边缘做过羽化，手臂处擦除衣服、露出真实手臂。
+// 3. 绝不付费：试衣全程只用本机 ML Kit + 本机图像变换，
+//    代码里没有任何付费接口、云端试衣/生图调用。
 //
 // 懒加载原则：相机、姿态检测器只在这里的 initState 里创建，
 // 离开页面（dispose）即停止视频流、释放相机、关闭检测器。
 // 任何一步失败（无相机权限、检测器加载失败）都只显示错误卡片，
 // 绝不会影响 App 启动和其他页面。
 //
-// 叠加方式说明：这是“关键点锚定贴图”（衣服 PNG 按肩宽/胯宽缩放后
-// 画在摄像头画面上），不是像素级换装。睡衣边缘在大幅度动作时
-// 可能露出来，属于 v1 的已知局限，README 里写明了。
+// 已知做不到（实话）：袖子不跟手臂走、没有布料褶皱/垂坠效果、
+// 遮挡只处理了手臂——这些要生成式模型才有，本机不做、云端不调。
 
 import 'dart:async';
 import 'dart:io';
@@ -21,6 +29,8 @@ import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 
 import '../data/database.dart';
 import '../models/clothing_item.dart';
+import '../services/garment_image.dart';
+import '../services/garment_warp.dart';
 import '../state/selection.dart';
 
 class LiveTryOnPage extends StatefulWidget {
@@ -204,6 +214,8 @@ class _LiveTryOnPageState extends State<LiveTryOnPage>
       final mapped = <PoseLandmarkType, Offset>{};
       for (final entry in pose.landmarks.entries) {
         final lm = entry.value;
+        // 置信度低的关键点直接丢掉，不拿它算衣服位置（否则衣服会乱飘）。
+        if (lm.likelihood < 0.5) continue;
         final nx = lm.x / w;
         final ny = lm.y / h;
         // 按传感器方向把图像坐标转成竖屏显示坐标，再按需镜像。
@@ -242,23 +254,12 @@ class _LiveTryOnPageState extends State<LiveTryOnPage>
     return buffer.done().buffer.asUint8List();
   }
 
-  Future<ui.Image?> _decodeImageFile(String path) async {
-    try {
-      final bytes = await File(path).readAsBytes();
-      final codec = await ui.instantiateImageCodec(bytes);
-      final frame = await codec.getNextFrame();
-      return frame.image;
-    } catch (_) {
-      return null;
-    }
-  }
-
   Future<void> _loadGarmentImages() async {
     _topImage =
-        _top == null ? null : await _decodeImageFile(_top!.displayPath);
+        _top == null ? null : await loadGarmentImage(_top!.displayPath);
     _bottomImage = _bottom == null
         ? null
-        : await _decodeImageFile(_bottom!.displayPath);
+        : await loadGarmentImage(_bottom!.displayPath);
   }
 
   Future<void> _saveOutfit() async {
@@ -372,7 +373,7 @@ class _LiveTryOnPageState extends State<LiveTryOnPage>
             CameraPreview(controller),
             Positioned.fill(
               child: CustomPaint(
-                painter: _TryOnPainter(
+                painter: GarmentWarpPainter(
                   landmarks: _landmarks,
                   hasPose: _hasPose,
                   topImage: _topImage,
@@ -414,7 +415,7 @@ class _LiveTryOnPageState extends State<LiveTryOnPage>
                   setState(() => _top = v);
                   _topImage = v == null
                       ? null
-                      : await _decodeImageFile(v.displayPath);
+                      : await loadGarmentImage(v.displayPath);
                   setState(() {});
                 }),
               ),
@@ -424,7 +425,7 @@ class _LiveTryOnPageState extends State<LiveTryOnPage>
                   setState(() => _bottom = v);
                   _bottomImage = v == null
                       ? null
-                      : await _decodeImageFile(v.displayPath);
+                      : await loadGarmentImage(v.displayPath);
                   setState(() {});
                 }),
               ),
@@ -435,7 +436,7 @@ class _LiveTryOnPageState extends State<LiveTryOnPage>
             children: [
               const Expanded(
                 child: Text(
-                  '提示：衣服按肩、胯、膝关键点贴合；大幅度动作时边缘可能有偏差。',
+                  '衣服按每帧姿态做透视贴合，会跟身体走；手臂挡住衣服时会露出真实手臂。长袖不跟手臂、没有布料褶皱效果。',
                   style: TextStyle(color: Colors.grey, fontSize: 11),
                 ),
               ),
@@ -473,89 +474,4 @@ class _LiveTryOnPageState extends State<LiveTryOnPage>
       ),
     );
   }
-}
-
-/// 把衣服图片按姿态关键点画到画面上。
-class _TryOnPainter extends CustomPainter {
-  final Map<PoseLandmarkType, Offset> landmarks;
-  final bool hasPose;
-  final ui.Image? topImage;
-  final ui.Image? bottomImage;
-
-  _TryOnPainter({
-    required this.landmarks,
-    required this.hasPose,
-    this.topImage,
-    this.bottomImage,
-  });
-
-  Offset? _lm(PoseLandmarkType t) => landmarks[t];
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (!hasPose) return;
-    final ls = _lm(PoseLandmarkType.leftShoulder);
-    final rs = _lm(PoseLandmarkType.rightShoulder);
-    final lh = _lm(PoseLandmarkType.leftHip);
-    final rh = _lm(PoseLandmarkType.rightHip);
-    final lk = _lm(PoseLandmarkType.leftKnee);
-    final rk = _lm(PoseLandmarkType.rightKnee);
-
-    // 先画淡淡的骨架点，方便用户确认识别是否准。
-    final dotPaint = Paint()..color = Colors.white.withValues(alpha: 0.85);
-    for (final p in landmarks.values) {
-      canvas.drawCircle(
-          Offset(p.dx * size.width, p.dy * size.height), 3, dotPaint);
-    }
-
-    if (ls != null && rs != null && lh != null && rh != null) {
-      final shoulderMid =
-          Offset((ls.dx + rs.dx) / 2, (ls.dy + rs.dy) / 2);
-      final hipMid = Offset((lh.dx + rh.dx) / 2, (lh.dy + rh.dy) / 2);
-      final shoulderW = (ls - rs).distance;
-      final torsoH = (hipMid - shoulderMid).distance;
-
-      // 上衣：以肩中点为中心，宽 = 肩宽 × 2.4，高 = 躯干长 × 1.5。
-      if (topImage != null && shoulderW > 0.05 && torsoH > 0.05) {
-        final w = shoulderW * 2.4 * size.width;
-        final h = torsoH * 1.5 * size.height;
-        final cx = shoulderMid.dx * size.width;
-        final top = shoulderMid.dy * size.height - shoulderW * 0.35 * size.height;
-        canvas.drawImageRect(
-          topImage!,
-          Rect.fromLTWH(0, 0, topImage!.width.toDouble(),
-              topImage!.height.toDouble()),
-          Rect.fromLTWH(cx - w / 2, top, w, h),
-          Paint(),
-        );
-      }
-      // 下装：以胯中点为上沿，宽 = 胯宽 × 2.2，高 = 胯到膝 × 1.35。
-      if (bottomImage != null && lk != null && rk != null) {
-        final kneeMid =
-            Offset((lk.dx + rk.dx) / 2, (lk.dy + rk.dy) / 2);
-        final hipW = (lh - rh).distance;
-        final legH = (kneeMid - hipMid).distance;
-        if (hipW > 0.03 && legH > 0.03) {
-          final w = hipW * 2.2 * size.width;
-          final h = legH * 1.35 * size.height;
-          final cx = hipMid.dx * size.width;
-          final top = hipMid.dy * size.height - hipW * 0.1 * size.height;
-          canvas.drawImageRect(
-            bottomImage!,
-            Rect.fromLTWH(0, 0, bottomImage!.width.toDouble(),
-                bottomImage!.height.toDouble()),
-            Rect.fromLTWH(cx - w / 2, top, w, h),
-            Paint(),
-          );
-        }
-      }
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _TryOnPainter old) =>
-      old.landmarks != landmarks ||
-      old.hasPose != hasPose ||
-      old.topImage != topImage ||
-      old.bottomImage != bottomImage;
 }
