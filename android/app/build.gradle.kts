@@ -10,6 +10,13 @@ android {
     // 固定 NDK 27.2：支持 Android 16 的 16KB 内存页，与 CI 安装的版本一致。
     ndkVersion = "27.2.12479018"
 
+    // Release 构建不跑 Android Lint：AGP 9 的 lint 在 camera_android_camerax 插件上
+    // 会崩（lintVitalAnalyzeRelease，JavaDocParser 调用 Java 21 才有的 List.removeLast()），
+    // 这是 lint 自身的 bug，不是 App 代码问题。旧工程同款问题就是这么修的。
+    lint {
+        checkReleaseBuilds = false
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
