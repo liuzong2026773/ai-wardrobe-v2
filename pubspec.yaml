@@ -1,0 +1,42 @@
+name: ai_wardrobe_v2
+description: "全本地离线 AI 电子衣橱与智能穿搭助手：导入衣服、天气/心情推荐、静态试穿、实时 AR 试衣镜。"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.14.0
+  flutter: ^3.50.0
+
+# 依赖刻意保持最小：只用必要的插件，启动时不加载任何原生 AI/相机库。
+# 不用 drift/build_runner、opencv_dart、flutter_onnxruntime 等重型原生库。
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: 1.0.9
+
+  # 拍照 / 相册选图（仅在导入衣服、拍全身照时调用）
+  image_picker: 1.2.4
+  # 实时摄像头（仅在 AR 试衣页打开时初始化，离开即释放）
+  camera: 0.11.4
+  # 端侧离线 AI：姿态关键点 + 人体抠图（仅在需要时懒加载，失败则用原图）
+  google_mlkit_pose_detection: 1.0.3
+  google_mlkit_subject_segmentation: 0.3.2
+  # 纯 Dart 图像处理（给抠图加透明遮罩，无原生库）
+  image: 4.13.1
+
+  # 本地存储：SQLite + 应用文件目录
+  sqflite: 2.4.6
+  path_provider: 2.1.6
+  path: 1.9.1
+
+  # 免费天气：Open-Meteo（免 Key），无定位/无网络时默认 20°C
+  http: 1.6.0
+  geolocator: 13.0.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: 6.0.0
+
+flutter:
+  uses-material-design: true
